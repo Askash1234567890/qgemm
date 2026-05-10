@@ -153,13 +153,15 @@ class TestQuantMatmul:
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
     def test_forward_cuda(self):
+        # atol=1e-4: tiled FP32 accumulation reorders operations vs torch.mm,
+        # producing rounding differences beyond the default atol=1e-8.
         dev = _device()
         torch.manual_seed(42)
         A = torch.randn(128, 64, device=dev)
         B = torch.randn(64, 256, device=dev)
         y_ref = ref_quant_matmul(A, B)
         y_fn = QuantMatmul.apply(A, B)
-        assert torch.allclose(y_ref, y_fn)
+        assert torch.allclose(y_ref, y_fn, atol=1e-4)
 
 
 # ── Phase 2: CUDA kernel ──────────────────────────────────────────────────────

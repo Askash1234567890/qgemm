@@ -132,14 +132,31 @@ pytest tests/ -v
 python benchmarks/bench_quant_matmul.py
 ```
 
-### Speedup table (TBD — fill after running on target GPU)
+### Speedup table
 
-| Shape (M=N=K) | FP32 cuBLAS | PyTorch ref | tile=16 | tile=32 | vs cuBLAS |
-|---------------|-------------|-------------|---------|---------|-----------|
-| 512 | — ms | — ms | — ms | — ms | — |
-| 1024 | — ms | — ms | — ms | — ms | — |
-| 2048 | — ms | — ms | — ms | — ms | — |
-| 4096 | — ms | — ms | — ms | — ms | — |
+GPU: **NVIDIA GeForce RTX 5090**, PyTorch 2.11.0+cu130, CUDA 13.0.
+
+| Shape (M, K, N) | FP32 cuBLAS | PyTorch ref | tile=16 | tile=32 | vs cuBLAS |
+|-----------------|-------------|-------------|---------|---------|-----------|
+| 512 × 256 × 512 | 0.015 ms | 0.098 ms | 0.124 ms | 0.124 ms | 0.12× |
+| 1024 × 512 × 1024 | 0.027 ms | 0.107 ms | 0.236 ms | 0.250 ms | 0.11× |
+| 2048 × 1024 × 2048 | 0.148 ms | 0.256 ms | 1.008 ms | 1.071 ms | 0.15× |
+| 4096 × 2048 × 4096 | 1.099 ms | 1.331 ms | 7.229 ms | 7.961 ms | 0.15× |
+
+The kernel is **6–9× slower** than cuBLAS at this stage — this is expected and explainable:
+
+- **cuBLAS** employs tensor cores (WMMA), double-buffered global→shared prefetching,
+  register-level blocking, and warp-level primitives — the result of years of
+  architecture-specific tuning.
+- **Our kernel** is a clean scalar shared-memory tiled GEMM: one float per thread,
+  no `__dp4a`, no computation/memory overlap, no register blocking.
+- **PyTorch ref** (fake-quant via `torch.mm`) routes through cuBLAS for the matmul
+  itself but adds quantization overhead, making it slower than the raw cuBLAS baseline
+  yet still faster than our kernel.
+
+Phase 4 will close this gap with vectorised `int4` loads, `__dp4a` INT8 dot-product
+intrinsics, and double-buffered prefetching — expected speedup: **3–5× over the
+current kernel**.
 
 *Run `ncu` for roofline analysis:*
 
@@ -165,6 +182,40 @@ ncu-ui profile.ncu-rep
 | Inner loop | `#pragma unroll` over tile dimension |
 | Streams | Kernel launched on `at::cuda::getCurrentCUDAStream()` |
 | Sync | No `cudaDeviceSynchronize` in hot path |
+
+---
+
+## Roadmap
+
+### Phase 4 — Performance (next)
+
+| Task | Technique | Expected gain |
+|------|-----------|---------------|
+| Vectorised INT8 loads | `__dp4a` / `reinterpret_cast<int4*>` with correct `tid→shmem` mapping | 2–3× memory BW |
+| Double-buffered prefetch | `cp.async` + ping-pong shared memory buffers | hide global load latency |
+| Register blocking | each thread accumulates 2×2 or 4×4 output sub-tile | 2–4× compute efficiency |
+| Warp-level reduction | `__shfl_down_sync` for final accumulation | reduce `__syncthreads` overhead |
+| Per-channel scale | vector scale along rows/cols instead of scalar | production QAT accuracy |
+| `cudaStream_t` pool | persistent stream pool for multi-kernel graphs | lower launch overhead |
+
+### Phase 5 — Packaging & CI
+
+- [ ] GitHub Actions CI (build + CPU tests on `ubuntu-latest`)
+- [ ] PyPI-compatible `sdist` / `wheel` with optional CUDA extension
+- [ ] `pip install qgemm` with pure-Python fallback for non-CUDA environments
+- [ ] `torch.compile` integration via `torch.library` custom op registration
+
+### Further ideas
+
+- **FP8 support** — E4M3 / E5M2 formats available on Hopper+ (sm_90);
+  requires custom pack/unpack, but halves memory footprint vs INT8
+- **CUTLASS backend** — swap scalar kernel for CUTLASS `GemmUniversal` template
+  to get tensor-core utilisation with minimal code
+- **Structured sparsity** — combine INT8 quantization with 2:4 sparsity
+  (NVIDIA Ampere sparse tensor cores); potential 2× throughput on top of INT8
+- **Dynamic quantization** — compute scale on-the-fly from running statistics
+  inside the kernel (fused quantize + matmul)
+- **Multi-GPU / NCCL** — sharded weight matmul with all-reduce for tensor parallelism
 
 ---
 

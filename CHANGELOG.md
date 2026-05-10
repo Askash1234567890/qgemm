@@ -30,6 +30,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   threads to rows 0–127, but `sA[32][32]` has only 32 rows — out-of-bounds write
   to shared memory corrupted the CUDA context. Replaced with the correct scalar
   template `quantized_gemm_forward_kernel<32>`. Vectorised loads deferred to Phase 4.
+- `test_forward_cuda`: added `atol=1e-4` to `torch.allclose`. Tiled FP32
+  accumulation reorders floating-point operations relative to `torch.mm`, producing
+  rounding differences that exceed the default `atol=1e-8`. Result is numerically
+  correct; tolerance aligned with all other CUDA kernel tests.
 
 ## [0.1.0] - 2026-04-15
 
