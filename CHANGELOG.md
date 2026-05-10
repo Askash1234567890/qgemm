@@ -25,6 +25,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   verification. `gradcheck` is incompatible with STE by design (`eps << quant_step`
   gives zero numerical Jacobian). New tests assert that gradients are non-zero for
   interior elements and zero for clipped elements.
+- `quantized_gemm_forward_32_vec4`: removed broken vec4 kernel that caused
+  `cudaErrorIllegalAddress`. Root cause: `sh_row = tid / (TILE/4)` mapped 1024
+  threads to rows 0–127, but `sA[32][32]` has only 32 rows — out-of-bounds write
+  to shared memory corrupted the CUDA context. Replaced with the correct scalar
+  template `quantized_gemm_forward_kernel<32>`. Vectorised loads deferred to Phase 4.
 
 ## [0.1.0] - 2026-04-15
 
