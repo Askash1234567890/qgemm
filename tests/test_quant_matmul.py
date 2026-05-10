@@ -36,9 +36,16 @@ class TestFakeQuantize:
         assert returned_scale.item() == pytest.approx(0.1)
 
     def test_mask_clips_boundaries(self):
-        # Force clipping: values exactly at boundary get mask=False.
-        x = torch.tensor([-300.0, 0.0, 300.0])
-        _, _, mask = fake_quantize(x)
+        # Use explicit scale=1.0 so clipping is deterministic:
+        #   -200 → x_q = clamp(-200, -128, 127) = -128 → mask=False
+        #     0  → x_q = 0                              → mask=True
+        #   200  → x_q = clamp(200, -128, 127)  = 127  → mask=False
+        #
+        # Note: auto-scale maps max(|x|)/127, so x=±300 → x_q=±127,
+        # which means -127 > -128 (mask=True) — not what we want to test.
+        scale = torch.tensor(1.0)
+        x = torch.tensor([-200.0, 0.0, 200.0])
+        _, _, mask = fake_quantize(x, scale)
         assert not mask[0].item()
         assert mask[1].item()
         assert not mask[2].item()
@@ -102,20 +109,47 @@ class TestQuantMatmul:
         assert A.grad.shape == A.shape
         assert B.grad.shape == B.shape
 
-    def test_gradcheck(self):
-        """STE: gradcheck with float64 and small inputs."""
+    def test_ste_gradient_correctness(self):
+        """
+        STE backward manual verification.
+
+        gradcheck is incompatible with STE: round() is piecewise-constant,
+        so numerical Jacobian (finite difference with eps << quant_step) is
+        always 0, while the analytical STE gradient is non-zero. This is
+        expected and correct behavior for QAT — gradcheck cannot validate it.
+
+        Instead we verify:
+          1. Gradients flow to all interior (non-clipped) elements.
+          2. Gradients are zero for clipped elements.
+          3. dA and dB have correct shapes.
+        """
         torch.manual_seed(7)
-        # Small matrices; float64 for numerical stability in gradcheck.
-        A = torch.randn(8, 4, dtype=torch.float64, requires_grad=True)
-        B = torch.randn(4, 8, dtype=torch.float64, requires_grad=True)
-        assert torch.autograd.gradcheck(
-            QuantMatmul.apply,
-            (A, B),
-            eps=1e-4,
-            atol=1e-3,
-            rtol=1e-3,
-            raise_exception=True,
-        )
+        # Use scale=1: values in [-127, 127] are interior, others clipped.
+        scale = torch.tensor(1.0)
+
+        A = torch.zeros(4, 4, requires_grad=True)
+        B = torch.zeros(4, 4, requires_grad=True)
+
+        with torch.no_grad():
+            # Interior values: will not be clipped
+            A_val = torch.full((4, 4), 1.0)
+            # Clipped values in row 0 of A
+            A_val[0, :] = 200.0
+
+        A = A_val.requires_grad_(True)
+        B_val = torch.ones(4, 4)
+        B = B_val.requires_grad_(True)
+
+        Y = QuantMatmul.apply(A, B, scale, scale)
+        Y.sum().backward()
+
+        assert A.grad is not None and B.grad is not None
+        assert A.grad.shape == A.shape
+        assert B.grad.shape == B.shape
+        # Interior rows (1–3) of A should have non-zero gradient
+        assert A.grad[1:].abs().sum() > 0
+        # Clipped row 0 of A should have zero gradient (STE mask=False)
+        assert A.grad[0].abs().sum().item() == pytest.approx(0.0)
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
     def test_forward_cuda(self):
@@ -247,21 +281,33 @@ class TestCudaBackward:
         assert gB_cuda.shape == (K, N)
 
     @_needs_ext
-    def test_gradcheck_cuda(self):
-        """Numerical gradcheck on CUDA (float64)."""
+    def test_ste_gradient_correctness_cuda(self):
+        """
+        STE backward manual verification on CUDA.
+
+        gradcheck cannot validate STE: round() is piecewise-constant, so the
+        numerical Jacobian (finite difference with eps << quant_step) is 0,
+        while the analytical STE gradient is non-zero. This is by design.
+
+        We verify instead: gradients flow to interior elements and are zeroed
+        for clipped elements.
+        """
         torch.manual_seed(3)
         dev = torch.device("cuda")
-        A = torch.randn(8, 4, dtype=torch.float64, device=dev, requires_grad=True)
-        B = torch.randn(4, 8, dtype=torch.float64, device=dev, requires_grad=True)
+        scale = torch.tensor(1.0, device=dev)
 
-        assert torch.autograd.gradcheck(
-            QuantMatmul.apply,
-            (A, B),
-            eps=1e-4,
-            atol=1e-3,
-            rtol=1e-3,
-            raise_exception=True,
-        )
+        A_val = torch.ones(4, 4, device=dev)
+        A_val[0, :] = 200.0           # row 0 will be clipped
+        A = A_val.requires_grad_(True)
+
+        B = torch.ones(4, 4, device=dev, requires_grad=True)
+
+        Y = QuantMatmul.apply(A, B, scale, scale)
+        Y.sum().backward()
+
+        assert A.grad is not None and B.grad is not None
+        assert A.grad[1:].abs().sum() > 0     # interior rows: grad flows
+        assert A.grad[0].abs().sum().item() == pytest.approx(0.0)  # clipped: zero
 
     @_needs_ext
     def test_ste_mask_zeros_clipped(self):

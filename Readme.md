@@ -36,16 +36,49 @@ Scale is **per-tensor** (one float per matrix).
 
 ## Installation
 
-**Requirements:** CUDA 12+, PyTorch ≥ 2.2, C++20 compiler, Ampere+ GPU (sm_80+).
+**Requirements:** PyTorch ≥ 2.2, C++20 compiler, Ampere+ GPU (sm_80+).
+
+`nvcc` and PyTorch **must use the same CUDA version**. Verify before building:
 
 ```bash
-git clone https://github.com/<you>/qgemm
+nvcc --version
+python -c "import torch; print(torch.version.cuda)"
+```
+
+If they differ, reinstall PyTorch to match your system CUDA:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu130   # CUDA 13.0
+pip install torch --index-url https://download.pytorch.org/whl/cu128   # CUDA 12.8
+pip install torch --index-url https://download.pytorch.org/whl/cu124   # CUDA 12.4
+```
+
+Or point the build to the CUDA version PyTorch expects:
+
+```bash
+export CUDA_HOME=/usr/local/cuda-12.8   # adjust to match torch.version.cuda
+```
+
+Then build:
+
+```bash
+git clone https://github.com/Askash1234567890/qgemm
 cd qgemm
-pip install -e .
+pip install ninja                            # optional but speeds up compilation
+uv pip install -e . --no-build-isolation     # use torch already in your env
+# or: pip install -e . --no-build-isolation
 ```
 
 This compiles `qgemm/_C.so` with `nvcc`.  
 Without a GPU the package installs in pure-Python mode (PyTorch fallback).
+
+`setup.py` auto-detects the GPU architecture via `nvidia-smi` and compiles only
+for the connected device. If detection fails, it falls back to a broad list
+covering Ampere through Blackwell (sm_80 … sm_101). You can override at any time:
+
+```bash
+TORCH_CUDA_ARCH_LIST="native" uv pip install -e . --no-build-isolation
+```
 
 ---
 
@@ -84,6 +117,12 @@ pytest tests/ -v
 | (no mark) | CPU only |
 | `skipif no CUDA` | CUDA GPU |
 | `skipif extension not built` | CUDA GPU + `pip install -e .` |
+
+> **Note on STE and `gradcheck`:** `torch.autograd.gradcheck` is incompatible
+> with STE by design. `round()` is piecewise-constant, so the numerical Jacobian
+> (finite difference with `eps << quant_step`) is always 0 while the analytical
+> STE gradient is non-zero. Tests verify STE correctness manually instead:
+> gradients are non-zero for interior elements and zero for clipped ones.
 
 ---
 

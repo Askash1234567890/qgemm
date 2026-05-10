@@ -18,6 +18,7 @@
 
 #include <cuda_runtime.h>
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <stdint.h>
 
 // ── helpers ──────────────────────────────────────────────────────────────────

@@ -9,7 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-04-10
+## [0.1.1] - 2026-05-10
+
+### Fixed
+- `setup.py`: added GPU arch auto-detection via `nvidia-smi`; fallback list extended
+  to include sm_100/sm_101 (Blackwell). Resolves `cudaErrorNoKernelImageForDevice`
+  on GPUs newer than Hopper.
+- `quant_gemm.cu`, `quant_gemm_backward.cu`: added missing
+  `#include <ATen/cuda/CUDAContext.h>` — required for `at::cuda::getCurrentCUDAStream()`
+  in PyTorch ≥ 2.11.
+- `test_mask_clips_boundaries`: fixed incorrect assumption — auto-scale maps
+  `max(|x|)/127`, so extreme values land at ±127 (not ±128). Test now uses
+  explicit `scale=1.0` to guarantee deterministic clipping.
+- `test_gradcheck` / `test_gradcheck_cuda`: replaced with manual STE gradient
+  verification. `gradcheck` is incompatible with STE by design (`eps << quant_step`
+  gives zero numerical Jacobian). New tests assert that gradients are non-zero for
+  interior elements and zero for clipped elements.
+
+## [0.1.0] - 2026-04-15
 
 ### Added
 - **Phase 1** — CPU/PyTorch fake-quant reference
